@@ -1,0 +1,540 @@
+<style>
+    :root {
+        --board-size: 800px;
+        --cell-size: calc(var(--board-size) / 11);
+        --bg-pastel: #fdf6f0;
+    }
+
+    body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        background-color: var(--bg-pastel);
+        font-family: 'Nanum Gothic', sans-serif;
+        margin: 0;
+        padding: 20px;
+    }
+
+    /* 11x11 보드판 레이아웃 */
+    #game-board {
+        width: var(--board-size);
+        height: var(--board-size);
+        display: grid;
+        grid-template-columns: repeat(11, 1fr);
+        grid-template-rows: repeat(11, 1fr);
+        border: 5px solid #ffccbc;
+        background-image: url('your-board-image.png'); /* 업로드하신 이미지 경로 */
+        background-size: cover;
+        position: relative;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+    }
+
+    /* 칸(Tile) 스타일 */
+    .tile {
+        border: 1px solid rgba(0,0,0,0.05);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-end;
+        font-size: 10px;
+        padding-bottom: 5px;
+    }
+
+    /* 플레이어 비행기 말 */
+    .player-token {
+        width: 40px;
+        height: 40px;
+        position: absolute;
+        transition: all 0.6s cubic-bezier(0.45, 0.05, 0.55, 0.95);
+        z-index: 100;
+        filter: drop-shadow(2px 4px 6px rgba(0,0,0,0.3));
+    }
+
+    /* 컨트롤 패널 */
+    #ui-panel {
+        margin-top: 20px;
+        padding: 20px;
+        background: white;
+        border-radius: 15px;
+        display: flex;
+        gap: 20px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+    }
+
+    .btn {
+        padding: 10px 25px;
+        border: none;
+        border-radius: 25px;
+        background: #ff8a65;
+        color: white;
+        font-weight: bold;
+        cursor: pointer;
+        transition: transform 0.2s;
+    }
+
+    .btn:hover { transform: scale(1.1); }
+    .btn:disabled { background: #ccc; }
+
+    #log-window {
+        width: 300px;
+        height: 100px;
+        overflow-y: auto;
+        border: 1px solid #ddd;
+        padding: 10px;
+        font-size: 12px;
+        background: #fafafa;
+    }
+</style>
+
+<h1>✈️ World Tour Adventure</h1>
+
+<div id="game-board">
+    </div>
+
+<div id="ui-panel">
+    <div id="player-info">
+        <strong>내 정보:</strong> <span id="my-money">1500</span>만 원
+        <br>턴: <span id="current-turn-name">-</span>
+    </div>
+    <button id="roll-btn" class="btn">주사위 굴리기</button>
+    <div id="log-window">게임을 시작합니다...</div>
+</div>
+
+<script>
+    // 1. Firebase 설정 (본인의 정보로 교체하세요)
+    const firebaseConfig = {
+         apiKey: "AIzaSyDKC5DGprtUlNSGxxpKz1JHFS3jCKWzS_Q",
+  authDomain: "sky-marble-d5c0c.firebaseapp.com",
+  databaseURL: "https://sky-marble-d5c0c-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "sky-marble-d5c0c",
+  storageBucket: "sky-marble-d5c0c.firebasestorage.app",
+  messagingSenderId: "217469621451",
+  appId: "1:217469621451:web:b3976260bfd99f978af74e"
+};   firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    // 2. 보드 데이터 (사용자 제공 밸런스 적용)
+    const BOARD_DATA = {
+        1: { name: "서울", price: 60, build: 50, rent: [2, 10, 30, 90] },
+        2: { name: "부산", price: 60, build: 50, rent: [2, 10, 30, 90] },
+        // ... (중략 - 39번까지 제공된 데이터를 객체화)
+        39: { name: "제주", price: 500, build: 300, rent: [50, 250, 750, 2250] },
+        40: { name: "출발", price: 0 }
+    };
+
+    // 3. 좌표 시스템 (11x11 그리드 배치용)
+    function getCoords(pos) {
+        // 시계 방향으로 0~39번 칸 좌표 계산 logic
+        if (pos <= 10) return { r: 11, c: 11 - pos }; // 하단 (오->왼)
+        if (pos <= 20) return { r: 11 - (pos - 10), c: 1 }; // 좌측 (하->상)
+        if (pos <= 30) return { r: 1, c: pos - 20 + 1 }; // 상단 (좌->우)
+        return { r: pos - 30 + 1, c: 11 }; // 우측 (상->하)
+    }
+
+    // 4. 핵심 게임 로직 클래스
+    class GameEngine {
+        constructor(roomId, myId) {
+            this.roomId = roomId;
+            this.myId = myId;
+            this.roomRef = db.ref(`rooms/${roomId}`);
+            this.init();
+        }
+
+        init() {
+            // 실시간 데이터 감시
+            this.roomRef.on('value', (snap) => {
+                const data = snap.val();
+                this.render(data);
+            });
+        }
+
+        async rollDice() {
+            const d1 = Math.floor(Math.random() * 6) + 1;
+            const d2 = Math.floor(Math.random() * 6) + 1;
+            const total = d1 + d2;
+            
+            const snap = await this.roomRef.child(`players/${this.myId}`).once('value');
+            const p = snap.val();
+            
+            let nextPos = (p.position + total);
+            let moneyBonus = 0;
+
+            // 월급 체크 (한바퀴)
+            if (nextPos > 40) {
+                nextPos %= 40;
+                moneyBonus = 20;
+                this.addLog("출발지를 통과하여 월급 20만 원을 받았습니다!");
+            }
+
+            await this.roomRef.child(`players/${this.myId}`).update({
+                position: nextPos,
+                money: p.money + moneyBonus
+            });
+
+            this.handleTileAction(nextPos);
+        }
+
+        async handleTileAction(pos) {
+            const tile = BOARD_DATA[pos];
+            if (!tile || pos === 40) return;
+
+            const tileSnap = await this.roomRef.child(`board/tiles/${pos}`).once('value');
+            const status = tileSnap.val();
+
+            if (!status || !status.owner) {
+                if (confirm(`${tile.name}을(를) 구매하시겠습니까? (가격: ${tile.price})`)) {
+                    this.buyProperty(pos, tile.price);
+                }
+            } else if (status.owner !== this.myId) {
+                this.payRent(pos, status.owner, status.level || 0);
+            }
+        }
+
+        // ... 구매 및 지불 함수 상세 구현 (앞서 제공한 트랜잭션 로직 포함)
+
+        render(data) {
+            // 플레이어 말 위치 업데이트 UI 로직
+            Object.keys(data.players).forEach(pid => {
+                const p = data.players[pid];
+                const coords = getCoords(p.position);
+                const token = document.getElementById(`token-${pid}`) || this.createToken(pid);
+                token.style.gridRow = coords.r;
+                token.style.gridColumn = coords.c;
+            });
+        }
+
+        addLog(msg) {
+            const win = document.getElementById('log-window');
+            win.innerHTML += `<div>${msg}</div>`;
+            win.scrollTop = win.scrollHeight;
+        }
+    }
+
+    // 초기 실행
+    const engine = new GameEngine('v123', 'player1');
+    document.getElementById('roll-btn').onclick = () => engine.rollDice();
+
+</script>
+
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>World Tour Adventure - Blue Marble</title>
+    <script src="https://www.gstatic.com/firebasejs/9.1.3/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.1.3/firebase-database-compat.js"></script>
+    
+    <style>
+        :root {
+            --board-size: 700px;
+            --cell-size: calc(var(--board-size) / 11);
+            --bg-pastel: #fdf6f0;
+        }
+
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: var(--bg-pastel);
+            font-family: 'Nanum Gothic', sans-serif;
+            margin: 0; padding: 20px;
+        }
+
+        /* 11x11 보드판 */
+        #game-board {
+            width: var(--board-size);
+            height: var(--board-size);
+            display: grid;
+            grid-template-columns: repeat(11, 1fr);
+            grid-template-rows: repeat(11, 1fr);
+            border: 5px solid #ffccbc;
+            background: white;
+            position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        /* 각 칸 스타일 */
+        .tile {
+            border: 1px solid #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            text-align: center;
+            background: #fff;
+            position: relative;
+        }
+
+        .tile .price { color: #e57373; font-weight: bold; margin-top: 5px; }
+        .tile .owner-mark { font-size: 9px; color: blue; }
+
+        /* 플레이어 말 */
+        .player-token {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            position: absolute;
+            z-index: 100;
+            transition: all 0.5s ease;
+            border: 2px solid white;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+        }
+
+        #ui-panel {
+            margin-top: 20px; padding: 20px;
+            background: white; border-radius: 15px;
+            display: flex; gap: 20px; align-items: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        }
+
+        .btn {
+            padding: 12px 30px; border: none; border-radius: 25px;
+            background: #ff8a65; color: white; font-weight: bold;
+            cursor: pointer; transition: transform 0.2s;
+        }
+        .btn:hover { transform: scale(1.05); }
+        .btn:disabled { background: #ccc; cursor: not-allowed; }
+
+        #log-window {
+            width: 300px; height: 80px; overflow-y: auto;
+            border: 1px solid #ddd; padding: 10px;
+            font-size: 12px; background: #fafafa; border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>✈️ World Tour Adventure</h1>
+
+    <div id="game-board">
+        <!-- JS에서 타일이 생성됩니다 -->
+    </div>
+
+    <div id="ui-panel">
+        <div id="player-info">
+            <strong>내 잔액:</strong> <span id="my-money">1500</span>만 원<br>
+            <strong>현재 차례:</strong> <span id="current-turn-name">대기 중...</span>
+        </div>
+        <button id="roll-btn" class="btn">주사위 굴리기</button>
+        <div id="log-window">게임을 시작합니다.</div>
+    </div>
+
+    <script>
+        // 1. Firebase 설정 (반드시 본인의 정보로 입력하세요)
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            databaseURL: "YOUR_DATABASE_URL",
+            projectId: "YOUR_PROJECT_ID",
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+
+        // 2. 보드 데이터 구성
+        const BOARD_DATA = {};
+        const cityNames = ["출발", "서울", "부산", "도쿄", "베이징", "무인도", "런던", "파리", "로마", "베를린", "사회복지", "뉴욕", "시드니", "방콕", "제주", "우주여행", "모스크바", "델리", "카이로", "상파울루"];
+        // 0~39번 칸 생성 (간략화된 예시 데이터)
+        for(let i=0; i<40; i++) {
+            BOARD_DATA[i] = {
+                name: cityNames[i % cityNames.length],
+                price: (i === 0) ? 0 : 50 + (i * 5),
+                build: 30 + (i * 2),
+                rent: [10 + i, 50 + i, 150 + i, 500 + i] // 대지, 집, 빌딩, 호텔 순
+            };
+        }
+
+        // 3. 좌표 시스템 (0~39 시계방향)
+        function getCoords(pos) {
+            if (pos <= 10) return { r: 11, c: 11 - pos }; // 하단 (오른쪽->왼쪽)
+            if (pos <= 20) return { r: 11 - (pos - 10), c: 1 }; // 왼쪽 (아래->위)
+            if (pos <= 30) return { r: 1, c: pos - 20 + 1 }; // 상단 (왼쪽->오른쪽)
+            return { r: pos - 30 + 1, c: 11 }; // 오른쪽 (위->아래)
+        }
+
+        class GameEngine {
+            constructor(roomId, myId) {
+                this.roomId = roomId;
+                this.myId = myId;
+                this.roomRef = db.ref(`rooms/${roomId}`);
+                this.playerColor = myId === 'p1' ? 'red' : 'blue';
+                this.initBoard();
+                this.syncData();
+            }
+
+            initBoard() {
+                const board = document.getElementById('game-board');
+                for (let i = 0; i < 40; i++) {
+                    const coords = getCoords(i);
+                    const tileDiv = document.createElement('div');
+                    tileDiv.className = 'tile';
+                    tileDiv.id = `tile-${i}`;
+                    tileDiv.style.gridRow = coords.r;
+                    tileDiv.style.gridColumn = coords.c;
+                    tileDiv.innerHTML = `<div>${BOARD_DATA[i].name}</div>`;
+                    if(BOARD_DATA[i].price > 0) {
+                        tileDiv.innerHTML += `<div class="price">${BOARD_DATA[i].price}</div>`;
+                    }
+                    board.appendChild(tileDiv);
+                }
+            }
+
+            syncData() {
+                this.roomRef.on('value', (snap) => {
+                    const data = snap.val();
+                    if (!data) return;
+
+                    // 플레이어 렌더링
+                    Object.keys(data.players).forEach(pid => {
+                        this.updateToken(pid, data.players[pid]);
+                    });
+
+                    // 내 정보 업데이트
+                    const me = data.players[this.myId];
+                    document.getElementById('my-money').innerText = me.money;
+                    document.getElementById('current-turn-name').innerText = data.turn === this.myId ? "내 차례!" : "상대방 차례";
+                    document.getElementById('roll-btn').disabled = (data.turn !== this.myId);
+
+                    // 타일 소유주 표시
+                    if(data.tiles) {
+                        Object.keys(data.tiles).forEach(tIdx => {
+                            const tInfo = data.tiles[tIdx];
+                            const tileEl = document.getElementById(`tile-${tIdx}`);
+                            tileEl.style.backgroundColor = tInfo.owner === 'p1' ? '#ffcdd2' : '#bbdefb';
+                            tileEl.querySelector('.price').innerText = `Lv.${tInfo.level}`;
+                        });
+                    }
+                });
+            }
+
+            updateToken(pid, pData) {
+                let token = document.getElementById(`token-${pid}`);
+                if (!token) {
+                    token = document.createElement('div');
+                    token.id = `token-${pid}`;
+                    token.className = 'player-token';
+                    token.style.backgroundColor = pid === 'p1' ? 'red' : 'blue';
+                    token.innerText = pid;
+                    document.getElementById('game-board').appendChild(token);
+                }
+                const coords = getCoords(pData.position);
+                token.style.gridRow = coords.r;
+                token.style.gridColumn = coords.c;
+                // 말이 겹치지 않게 살짝 오프셋
+                token.style.transform = pid === 'p1' ? 'translate(-5px, -5px)' : 'translate(10px, 10px)';
+            }
+
+            async rollDice() {
+                const dice = Math.floor(Math.random() * 6) + 1;
+                this.addLog(`🎲 주사위 ${dice}가 나왔습니다!`);
+
+                const snap = await this.roomRef.once('value');
+                const data = snap.val();
+                let newPos = (data.players[this.myId].position + dice) % 40;
+                let moneyPlus = (data.players[this.myId].position + dice >= 40) ? 20 : 0;
+
+                // 위치 및 자산 업데이트
+                await this.roomRef.child(`players/${this.myId}`).update({
+                    position: newPos,
+                    money: data.players[this.myId].money + moneyPlus
+                });
+
+                if(moneyPlus > 0) this.addLog("출발지를 통과하여 20만 원을 받았습니다.");
+
+                this.handleTileAction(newPos);
+            }
+
+            async handleTileAction(pos) {
+                if (pos === 0) return this.endTurn(); // 출발지
+                
+                const tileData = BOARD_DATA[pos];
+                const snap = await this.roomRef.child(`tiles/${pos}`).once('value');
+                const tileOwnerInfo = snap.val();
+
+                if (!tileOwnerInfo) {
+                    // 빈 땅 구매 확인
+                    if (confirm(`${tileData.name} (가격: ${tileData.price})을 구매하시겠습니까?`)) {
+                        this.processTransaction(pos, tileData.price, 'buy');
+                    } else {
+                        this.endTurn();
+                    }
+                } else if (tileOwnerInfo.owner !== this.myId) {
+                    // 통행료 지불
+                    const rent = tileData.rent[tileOwnerInfo.level];
+                    alert(`${tileOwnerInfo.owner}의 땅입니다! 통행료 ${rent}만 원을 지불합니다.`);
+                    this.processTransaction(pos, rent, 'rent', tileOwnerInfo.owner);
+                } else {
+                    // 내 땅 - 업그레이드
+                    if (tileOwnerInfo.level < 3 && confirm(`건물을 추가하시겠습니까? (비용: ${tileData.build})`)) {
+                        this.processTransaction(pos, tileData.build, 'upgrade');
+                    } else {
+                        this.endTurn();
+                    }
+                }
+            }
+
+            async processTransaction(pos, amount, type, receiverId = null) {
+                const nextTurn = this.myId === 'p1' ? 'p2' : 'p1';
+                
+                await this.roomRef.transaction((state) => {
+                    if (state) {
+                        const myMoney = state.players[this.myId].money;
+                        if (myMoney < amount) {
+                            alert("잔액이 부족합니다!");
+                            return;
+                        }
+                        
+                        state.players[this.myId].money -= amount;
+                        
+                        if (type === 'buy') {
+                            if (!state.tiles) state.tiles = {};
+                            state.tiles[pos] = { owner: this.myId, level: 0 };
+                        } else if (type === 'upgrade') {
+                            state.tiles[pos].level += 1;
+                        } else if (type === 'rent') {
+                            state.players[receiverId].money += amount;
+                        }
+                        
+                        state.turn = nextTurn; // 턴 넘기기
+                    }
+                    return state;
+                });
+                this.addLog(`${type === 'rent' ? '통행료 지불' : '거래'} 완료.`);
+            }
+
+            endTurn() {
+                const nextTurn = this.myId === 'p1' ? 'p2' : 'p1';
+                this.roomRef.update({ turn: nextTurn });
+            }
+
+            addLog(msg) {
+                const win = document.getElementById('log-window');
+                win.innerHTML += `<div>- ${msg}</div>`;
+                win.scrollTop = win.scrollHeight;
+            }
+        }
+
+        // 초기 데이터 세팅 (방이 없을 경우)
+        function initGameRoom(roomId) {
+            db.ref(`rooms/${roomId}`).set({
+                turn: 'p1',
+                players: {
+                    p1: { position: 0, money: 1500 },
+                    p2: { position: 0, money: 1500 }
+                }
+            });
+        }
+
+        // 실행 (테스트용으로 p1으로 접속)
+        const myRoomId = 'room_101';
+        // initGameRoom(myRoomId); // 처음 한 번만 실행해서 DB 초기화 필요
+        const engine = new GameEngine(myRoomId, 'p1');
+        document.getElementById('roll-btn').onclick = () => engine.rollDice();
+
+    </script>
+</body>
+</html>
